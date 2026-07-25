@@ -1,0 +1,22 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - set -eu
+      - REGION="${AWS_REGION:-${AWS_DEFAULT_REGION}}"
+      - test -n "$REGION" || (echo "AWS_REGION não definida" && exit 1)
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - echo "ECR login - $ACCOUNT_ID @ $REGION"
+      - aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+  build:
+    commands:
+      - set -eu
+      - echo "Pull $IMAGE_URI:$IMAGE_TAG"
+      - docker pull "$IMAGE_URI:$IMAGE_TAG"
+      - CID=$(docker create "$IMAGE_URI:$IMAGE_TAG")
+      - mkdir -p out
+      - docker cp "$CID:/usr/share/nginx/html/." out/ || (echo "Falhou copiar /usr/share/nginx/html — confira o Dockerfile do front." && exit 1)
+      - docker rm "$CID"
+      - test -f out/index.html || (echo "out/index.html ausente — imagem ECR inválida ou build vazio" && exit 1)
+      - aws s3 sync out/ "s3://$BUCKET_NAME/" --delete
