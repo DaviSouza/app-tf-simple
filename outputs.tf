@@ -1,3 +1,13 @@
+# =============================================================================
+# OUTPUTS — valores exportados após terraform apply
+# =============================================================================
+# Entrevista: "Para que servem outputs?"
+# → Expor IDs/URLs para outros módulos (terraform_remote_state), CI/CD, ou uso humano.
+# terraform output <nome> — consulta valor; sensitive outputs ficam ocultos no terminal.
+# =============================================================================
+
+# --- Rede ---
+
 output "vpc_id" {
   description = "ID da VPC — necessário para peerings, VPN, ou importar em outro stack."
   value       = aws_vpc.main.id
@@ -23,6 +33,8 @@ output "nat_gateway_id" {
   value       = aws_nat_gateway.main.id
 }
 
+# --- ECR ---
+
 output "cadastro_cliente_repository_uri" {
   description = "URI para docker push/pull da API Rust (cadastro-cliente)."
   value       = aws_ecr_repository.main["cadastro_cliente"].repository_url
@@ -42,6 +54,8 @@ output "ecr_repository_arns" {
   description = "Map de ARNs ECR — usado em políticas IAM cross-service."
   value       = { for k, repo in aws_ecr_repository.main : k => repo.arn }
 }
+
+# --- S3 / CloudFront ---
 
 output "s3_bucket_name" {
   description = "Nome do bucket S3 do front — destino do CodeBuild."
@@ -73,6 +87,8 @@ output "cloudfront_distribution_domain" {
   value       = aws_cloudfront_distribution.front.domain_name
 }
 
+# --- RDS ---
+
 output "db_endpoint_hostname" {
   description = "Hostname do RDS — use no DBeaver ou connection string."
   value       = aws_db_instance.postgres.address
@@ -87,6 +103,8 @@ output "db_secret_arn" {
   description = "ARN do secret com username/password — ECS e operadores leem daqui."
   value       = aws_secretsmanager_secret.db_credentials.arn
 }
+
+# --- ECS / ALB ---
 
 output "load_balancer_dns_name" {
   description = "DNS interno do ALB — API Gateway faz proxy para este host."
@@ -118,6 +136,8 @@ output "cadastro_cliente_app_config_secret_arn" {
   value       = aws_secretsmanager_secret.app_config.arn
 }
 
+# --- Cognito ---
+
 output "cognito_user_pool_id" {
   description = "ID do User Pool — configure no front-end (VITE_COGNITO_USER_POOL_ID)."
   value       = aws_cognito_user_pool.main.id
@@ -128,10 +148,14 @@ output "cognito_user_pool_client_id" {
   value       = aws_cognito_user_pool_client.main.id
 }
 
+# --- WAF ---
+
 output "web_acl_arn" {
   description = "ARN do WAF CloudFront (us-east-1) — associado à distribuição."
   value       = aws_wafv2_web_acl.cloudfront.arn
 }
+
+# --- API Gateway ---
 
 output "http_api_url" {
   description = "URL base do API Gateway HTTP — endpoint público da API."
@@ -147,6 +171,8 @@ output "realtime_http_api_base" {
   description = "Base URL para rotas POST /realtime/* via API Gateway."
   value       = "${aws_apigatewayv2_api.cadastro_cliente.api_endpoint}/realtime"
 }
+
+# --- Insights ---
 
 output "insights_alb_dns_name" {
   description = "DNS do ALB para CNAME do subdomínio realtime customizado."
@@ -173,6 +199,8 @@ output "insights_config_secret_arn" {
   value       = aws_secretsmanager_secret.insights_config.arn
 }
 
+# --- CodeBuild ---
+
 output "front_deploy_project_name" {
   description = "Nome do projeto CodeBuild — usado pelo script front-deploy.sh."
   value       = aws_codebuild_project.front_deploy.name
@@ -181,4 +209,35 @@ output "front_deploy_project_name" {
 output "front_deploy_hint" {
   description = "Instrução de próximo passo para publicar o front no S3."
   value       = local.front_deploy_hint
+}
+
+# --- CI/CD Opção C ---
+
+output "github_connection_arn" {
+  description = "ARN da conexão GitHub (CodeConnections). Autorize no console se status for PENDING."
+  value       = try(local.github_connection_arn, null)
+}
+
+output "github_connection_status_hint" {
+  description = "Próximo passo após criar a conexão GitHub."
+  value = !local.cicd_enabled ? "CI/CD desligado (enable_cicd=false ou github_owner vazio)." : (
+    var.github_connection_arn != null
+    ? "Usando conexão existente. Pipelines ativos se a conexão estiver Available."
+    : "Console AWS → Developer Tools → Connections → '${var.project_name}-github' → Update pending connection → autorizar GitHub e selecionar os repositórios."
+  )
+}
+
+output "pipeline_cadastro_cliente_name" {
+  description = "Nome do CodePipeline do cadastro-cliente."
+  value       = try(aws_codepipeline.cadastro_cliente[0].name, null)
+}
+
+output "pipeline_front_client_name" {
+  description = "Nome do CodePipeline do front-client."
+  value       = try(aws_codepipeline.front_client[0].name, null)
+}
+
+output "cicd_hint" {
+  description = "Como ativar o CI/CD Opção C."
+  value       = "Defina github_owner no tfvars, terraform apply, autorize a conexão GitHub no console, depois faça push: ${var.github_cadastro_cliente_repo}@${var.github_cadastro_cliente_branch} → ECS; ${var.github_front_client_repo}@${var.github_front_client_branch} → S3."
 }

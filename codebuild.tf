@@ -1,3 +1,11 @@
+# =============================================================================
+# CODEBUILD — deploy do front-client (ECR → S3)
+# =============================================================================
+# Entrevista: "Por que CodeBuild e não terraform provisioner direto no S3?"
+# → Build roda em ambiente isolado Linux com Docker; extrai assets do container e invalida CloudFront.
+# null_resource + local-exec dispara o build apenas quando run_front_deploy=true.
+# =============================================================================
+
 variable "front_client_image_tag" {
   description = "Tag da imagem front-client no ECR consumida pelo CodeBuild para extrair assets estáticos."
   type        = string
@@ -13,9 +21,11 @@ variable "run_front_deploy" {
 locals {
   front_client_image_uri = aws_ecr_repository.main["front_client"].repository_url
 
+  # Mensagem exibida no output front_deploy_hint conforme flag
   front_deploy_hint = var.run_front_deploy ? "CodeBuild será executado neste apply (run_front_deploy=true)" : "Infra OK. Publique: push front-client no ECR, depois terraform apply -var=run_front_deploy=true"
 }
 
+# IAM Role — CodeBuild assume esta role via sts:AssumeRole (trust policy)
 resource "aws_iam_role" "codebuild_front" {
   name = "${var.project_name}-codebuild-front"
 
@@ -33,6 +43,7 @@ resource "aws_iam_role" "codebuild_front" {
   }
 }
 
+# Inline policy — permissões mínimas: logs, S3 do front, pull ECR front_client
 resource "aws_iam_role_policy" "codebuild_front" {
   name = "${var.project_name}-codebuild-front"
   role = aws_iam_role.codebuild_front.id
@@ -89,14 +100,14 @@ resource "aws_codebuild_project" "front_deploy" {
   build_timeout = 20
 
   artifacts {
-    type = "NO_ARTIFACTS"
+    type = "NO_ARTIFACTS" # Output vai direto pro S3 via script do buildspec
   }
 
   environment {
     compute_type                = "BUILD_GENERAL1_SMALL"
     image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
-    privileged_mode             = true
+    privileged_mode             = true # Necessário para docker pull/run dentro do build
     image_pull_credentials_type = "CODEBUILD"
 
     environment_variable {
@@ -121,7 +132,7 @@ resource "aws_codebuild_project" "front_deploy" {
   }
 
   source {
-    type      = "NO_SOURCE"
+    type      = "NO_SOURCE" # Buildspec inline via file(); sem repo Git conectado
     buildspec = file("${path.module}/buildspec/front-to-s3.yml")
   }
 
@@ -130,6 +141,9 @@ resource "aws_codebuild_project" "front_deploy" {
   }
 }
 
+# null_resource — recurso "virtual" para side-effects (provisioner local-exec)
+# count = 0 ou 1: padrão condicional (alternativa: for_each com map vazio)
+# triggers: força re-execução quando image_tag ou buildspec mudam
 resource "null_resource" "front_deploy" {
   count = var.run_front_deploy ? 1 : 0
 

@@ -1,0 +1,14 @@
+# Copie para terraform.tfvars (não commitar secrets).
+# CI/CD Opção C — GitHub + CodePipeline + CodeBuild
+
+enable_cicd  = true
+github_owner = "DaviSouza"
+
+# Opcional (defaults já batem com os nomes/branches dos repos):
+# github_cadastro_cliente_repo   = "app-cadastro-cliente"
+# github_cadastro_cliente_branch = "main"
+# github_front_client_repo       = "app-front-client"
+# github_front_client_branch     = "master"
+
+# Se já tiver uma conexão GitHub Available no console:
+# github_connection_arn = "arn:aws:codeconnections:us-east-1:ACCOUNT:connection/UUID"

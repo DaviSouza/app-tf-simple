@@ -1,0 +1,38 @@
+version: 0.2
+
+# Opção C — build do app-cadastro-cliente (GitHub → CodeBuild → ECR → ECS).
+# Buildspec fica no Terraform (inline no projeto CodeBuild); o repo do app não precisa de buildspec.yml.
+# Dockerfile atual faz COPY .env — criamos um .env mínimo no build (runtime usa Secrets Manager no ECS).
+
+env:
+  variables:
+    IMAGE_TAG: latest
+
+phases:
+  pre_build:
+    commands:
+      - set -eu
+      - echo "Login ECR"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+      - COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
+      - IMAGE_TAG="${COMMIT_HASH:-latest}"
+      - echo "IMAGE_TAG=$IMAGE_TAG"
+      - |
+        if [ ! -f .env ]; then
+          echo "Criando .env mínimo para o Docker build (não usado em runtime no ECS)"
+          printf 'DATABASE_URL=postgres://unused:unused@127.0.0.1:5432/unused\nJWT_SECRET=ci-placeholder\nHOST=0.0.0.0\nPORT=8002\n' > .env
+        fi
+  build:
+    commands:
+      - set -eu
+      - echo "Building $REPOSITORY_URI:$IMAGE_TAG"
+      - docker build -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:latest" .
+  post_build:
+    commands:
+      - set -eu
+      - echo "Push ECR"
+      - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+      - docker push "$REPOSITORY_URI:latest"
+      - echo "Atualizando serviço ECS"
+      - aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "$ECS_SERVICE_NAME" --force-new-deployment --region "$AWS_DEFAULT_REGION"
+      - echo "Deploy disparado para $ECS_SERVICE_NAME ($IMAGE_TAG)"

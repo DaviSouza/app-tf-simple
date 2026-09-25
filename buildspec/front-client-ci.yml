@@ -1,0 +1,40 @@
+version: 0.2
+
+# Opção C — build do app-front-client (GitHub → CodeBuild → ECR → S3 → CloudFront).
+# VITE_* / COGNITO_* vêm de environment variables do projeto CodeBuild (Terraform).
+
+env:
+  variables:
+    IMAGE_TAG: latest
+
+phases:
+  pre_build:
+    commands:
+      - set -eu
+      - echo "Login ECR"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+      - COMMIT_HASH=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
+      - IMAGE_TAG="${COMMIT_HASH:-latest}"
+      - echo "IMAGE_TAG=$IMAGE_TAG"
+  build:
+    commands:
+      - set -eu
+      - echo "Building front com VITE_* / COGNITO_* do ambiente"
+      - export COGNITO_AUTHORITY="${COGNITO_AUTHORITY:-$VITE_COGNITO_AUTHORITY}"
+      - export COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$VITE_COGNITO_CLIENT_ID}"
+      - docker build --build-arg "VITE_API_GATEWAY_URL=${VITE_API_GATEWAY_URL}" --build-arg "COGNITO_AUTHORITY=${COGNITO_AUTHORITY}" --build-arg "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" --build-arg "VITE_REALTIME_SSE_URL=${VITE_REALTIME_SSE_URL}" --build-arg "VITE_REALTIME_HTTP_URL=${VITE_REALTIME_HTTP_URL}" -t "$REPOSITORY_URI:$IMAGE_TAG" -t "$REPOSITORY_URI:latest" .
+  post_build:
+    commands:
+      - set -eu
+      - echo "Push ECR"
+      - docker push "$REPOSITORY_URI:$IMAGE_TAG"
+      - docker push "$REPOSITORY_URI:latest"
+      - echo "Publicando assets no S3"
+      - CID=$(docker create "$REPOSITORY_URI:$IMAGE_TAG")
+      - mkdir -p out
+      - docker cp "$CID:/usr/share/nginx/html/." out/
+      - docker rm "$CID"
+      - test -f out/index.html || (echo "index.html ausente na imagem" && exit 1)
+      - aws s3 sync out/ "s3://${BUCKET_NAME}/" --delete
+      - aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths "/*"
+      - echo "Front publicado ($IMAGE_TAG)"

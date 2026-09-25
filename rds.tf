@@ -1,3 +1,12 @@
+# =============================================================================
+# RDS — PostgreSQL gerenciado
+# =============================================================================
+# Entrevista: "RDS vs EC2 com Postgres?"
+# → RDS: backups automáticos, patches, Multi-AZ, read replicas. EC2: controle total, mais ops.
+# Este stack usa RDS público (dev/DBeaver). Produção: subnet privada + bastion/VPN.
+# =============================================================================
+
+# Security Group — firewall stateful na camada ENI (não confundir com NACL stateless na subnet)
 resource "aws_security_group" "db" {
   name        = "${var.project_name}-db"
   description = "PostgreSQL access from VPC and clients externos (DBeaver)"
@@ -12,7 +21,7 @@ resource "aws_security_group" "db" {
   }
 
   ingress {
-    description = "PostgreSQL from internet (DBeaver) — NÃO usar em produção"
+    description = "PostgreSQL from internet (DBeaver) - NAO usar em producao"
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
@@ -22,7 +31,7 @@ resource "aws_security_group" "db" {
   egress {
     from_port   = 0
     to_port     = 0
-    protocol    = "-1"
+    protocol    = "-1" # Todos os protocolos
     cidr_blocks = ["0.0.0.0/0"]
   }
 
@@ -31,30 +40,33 @@ resource "aws_security_group" "db" {
   }
 }
 
+# DB Subnet Group — RDS precisa de ≥2 subnets em AZs diferentes (requisito AWS)
 resource "aws_db_subnet_group" "public" {
   name        = "${var.project_name}-postgres-public"
   description = "Subnets públicas para RDS acessível via internet (DBeaver)"
-  subnet_ids  = aws_subnet.public[*].id
+  subnet_ids  = aws_subnet.public[*].id # splat [*] = lista de IDs de todas as subnets públicas
 
   tags = {
     Name = "${var.project_name}/postgres-public"
   }
 }
 
+# Secrets Manager — armazena credenciais; ECS lê em runtime (não hardcoded no task definition)
 resource "aws_secretsmanager_secret" "db_credentials" {
-  name_prefix             = "${var.project_name}-db-"
+  name_prefix             = "${var.project_name}-db-" # prefix gera sufixo aleatório (evita conflito se recriar)
   description             = "Credenciais PostgreSQL (${var.project_name})"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 7 # Janela antes de deletar permanentemente (0 = imediato)
 
   tags = {
     Name = "${var.project_name}/db-credentials"
   }
 }
 
+# Senha gerada pelo Terraform (random provider) — 30 chars com caracteres especiais permitidos pelo RDS
 resource "random_password" "db" {
   length           = 30
   special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  override_special = "!#$%&*()-_=+[]{}<>:?" # RDS rejeita alguns chars (@, /, ", espaço)
 }
 
 resource "aws_secretsmanager_secret_version" "db_credentials" {
@@ -73,22 +85,22 @@ resource "aws_db_instance" "postgres" {
   instance_class = var.db_instance_class
 
   allocated_storage     = var.db_allocated_storage
-  max_allocated_storage = var.db_max_allocated_storage
-  storage_type          = "gp2"
+  max_allocated_storage = var.db_max_allocated_storage # Storage autoscaling até este limite
+  storage_type          = "gp2"                        # SSD general purpose (gp3 = mais barato/modern)
   storage_encrypted     = true
 
   db_name  = var.db_name
   username = var.db_username
-  password = random_password.db.result
+  password = random_password.db.result # Mesma senha do secret (RDS não lê do Secrets Manager automaticamente aqui)
 
   db_subnet_group_name   = aws_db_subnet_group.public.name
   vpc_security_group_ids = [aws_security_group.db.id]
   publicly_accessible    = var.db_publicly_accessible
-  multi_az               = false
+  multi_az               = false # Multi-AZ = standby síncrono em outra AZ (HA, dobra custo)
 
   backup_retention_period   = var.db_backup_retention_period
   deletion_protection       = var.db_deletion_protection
-  skip_final_snapshot       = false
+  skip_final_snapshot       = false # false = cria snapshot antes de destroy (proteção de dados)
   final_snapshot_identifier = "${var.project_name}-postgres-final"
 
   copy_tags_to_snapshot = true

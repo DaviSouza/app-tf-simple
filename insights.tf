@@ -1,8 +1,18 @@
+# =============================================================================
+# INSIGHTS — serviço realtime/SSE + MCP no mesmo cluster ECS
+# =============================================================================
+# Compartilha ALB com cadastro-cliente via listener rule (path /realtime/* ou host-header).
+# Dois containers lógicos na mesma task: HTTP 8787 (realtime) + MCP 8899 (localhost only).
+# Entrevista: "deployment_circuit_breaker no ECS?"
+# → Se new tasks falham health check repetidamente, rollback automático para task definition anterior.
+# =============================================================================
+
 locals {
   api_gateway_base_url = trimsuffix(aws_apigatewayv2_api.cadastro_cliente.api_endpoint, "/")
 
   insights_image = "${aws_ecr_repository.main["front_insights"].repository_url}:${var.front_insights_image_tag}"
 
+  # URL SSE sugerida para VITE_REALTIME_SSE_URL — prioridade: cors_origin > insights_host > CloudFront
   insights_host_hint = (
     var.cors_origin != null && var.cors_origin != "" && var.cors_origin != "*"
     ? "${trimsuffix(var.cors_origin, "/")}/realtime/events"
@@ -182,6 +192,8 @@ resource "aws_lb_target_group" "insights" {
   }
 }
 
+# Listener Rule — roteamento condicional no ALB (prioridade 25)
+# dynamic block: cria condition host_header OU path_pattern conforme insights_host
 resource "aws_lb_listener_rule" "insights" {
   listener_arn = aws_lb_listener.http.arn
   priority     = var.insights_listener_rule_priority

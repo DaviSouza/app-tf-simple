@@ -1,3 +1,14 @@
+# =============================================================================
+# VARIABLES — parâmetros de entrada do módulo/root module
+# =============================================================================
+# Entrevista: "Como passar valores para variables?"
+# → terraform.tfvars, -var="nome=valor", TF_VAR_nome env var, ou default no bloco.
+# type constraint valida o tipo em plan/apply (string, number, bool, list, map, object).
+# sensitive = true oculta valor no output do plan (não criptografa no state!).
+# =============================================================================
+
+# --- Região e naming ---
+
 variable "aws_region" {
   description = "Região AWS onde a maioria dos recursos será criada. WAF CloudFront continua em us-east-1 via provider alias."
   type        = string
@@ -10,17 +21,23 @@ variable "project_name" {
   default     = "app-tf-simple"
 }
 
+# --- Rede (VPC) ---
+
 variable "vpc_cidr" {
   description = "Bloco CIDR da VPC (/16 = 65.536 IPs). Subnets são derivadas com cidrsubnet() nos locals."
   type        = string
   default     = "10.0.0.0/16"
 }
 
+# --- S3 ---
+
 variable "s3_bucket_name" {
   description = "Nome global único do bucket S3. Se null, Terraform gera automaticamente com random_id (nomes S3 são únicos mundialmente)."
   type        = string
   default     = null
 }
+
+# --- RDS PostgreSQL ---
 
 variable "db_username" {
   description = "Usuário master do PostgreSQL. Criado na instância RDS e armazenado no Secrets Manager."
@@ -76,11 +93,15 @@ variable "db_publicly_accessible" {
   default     = true
 }
 
+# --- Lambda auth-service (API Gateway) ---
+
 variable "auth_lambda_source_dir" {
   description = "Diretório com código Node.js da Lambda auth-service (precisa de node_modules). null = caminho padrão do projeto CDK."
   type        = string
   default     = null
 }
+
+# --- ECS / cadastro-cliente (app Rust) ---
 
 variable "cadastro_cliente_image_tag" {
   description = "Tag da imagem Docker no ECR. Terraform referencia a URI; o push da imagem é feito fora do Terraform (CI/CD)."
@@ -136,6 +157,8 @@ variable "app_rust_log" {
   default     = "info"
 }
 
+# --- ECS / insights (realtime + MCP) ---
+
 variable "front_insights_image_tag" {
   description = "Tag da imagem front-insights no ECR para o serviço de realtime/SSE."
   type        = string
@@ -145,12 +168,14 @@ variable "front_insights_image_tag" {
 variable "insights_service_email" {
   description = "Email usado pelo serviço insights para autenticar via POST /auth/login no API Gateway."
   type        = string
-  sensitive   = true
+  default     = "admin@dsmercado.com"
+  sensitive   = true # Oculta no plan output; armazenado no Secrets Manager
 }
 
 variable "insights_service_password" {
-  description = "Senha do serviço insights. Passar via TF_VAR_insights_service_password ou terraform.tfvars (não versionado)."
+  description = "Senha do serviço insights. sensitive=true evita vazamento no terminal durante terraform plan."
   type        = string
+  default     = "admin"
   sensitive   = true
 }
 
@@ -188,4 +213,48 @@ variable "insights_listener_rule_priority" {
   description = "Prioridade da regra no ALB listener. Menor número = avaliada primeiro. Default (cadastro-cliente) usa prioridade implícita baixa."
   type        = number
   default     = 25
+}
+
+# --- CI/CD (Opção C: GitHub + CodePipeline + CodeBuild) ---
+
+variable "enable_cicd" {
+  description = "Se true e github_owner estiver preenchido, cria CodePipeline + CodeBuild para os apps."
+  type        = bool
+  default     = true
+}
+
+variable "github_owner" {
+  description = "Usuário ou organização no GitHub (ex.: davisouza). Vazio desativa criação dos pipelines."
+  type        = string
+  default     = "DaviSouza"
+}
+
+variable "github_cadastro_cliente_repo" {
+  description = "Nome do repositório GitHub do app-cadastro-cliente."
+  type        = string
+  default     = "app-cadastro-cliente"
+}
+
+variable "github_front_client_repo" {
+  description = "Nome do repositório GitHub do app-front-client."
+  type        = string
+  default     = "app-front-client"
+}
+
+variable "github_cadastro_cliente_branch" {
+  description = "Branch do app-cadastro-cliente que dispara o pipeline (deploy ECS)."
+  type        = string
+  default     = "main"
+}
+
+variable "github_front_client_branch" {
+  description = "Branch do app-front-client que dispara o pipeline (deploy S3/CloudFront)."
+  type        = string
+  default     = "master"
+}
+
+variable "github_connection_arn" {
+  description = "ARN de uma CodeConnections GitHub já autorizada. Se null, Terraform cria uma conexão (fica PENDING até autorizar no console)."
+  type        = string
+  default     = null
 }

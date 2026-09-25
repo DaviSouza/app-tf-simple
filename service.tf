@@ -1,13 +1,26 @@
+# =============================================================================
+# ECS EC2 + ALB — serviço cadastro-cliente (API Rust)
+# =============================================================================
+# Arquitetura: EC2 launch type (não Fargate) + bridge network + dynamic host port.
+# Entrevista: "execution role vs task role no ECS?"
+# → execution role: ECS agent puxa imagem ECR, escreve logs, lê secrets (infra).
+# → task role: permissões DENTRO do container (ex.: acessar S3, DynamoDB).
+# Entrevista: "Por que hostPort = 0?"
+# → ECS aloca porta dinâmica no host (32768-65535); ALB target group aponta para instance:porta.
+# =============================================================================
+
+# SSM Parameter — AMI otimizada para ECS (Amazon Linux 2) mantida pela AWS
 data "aws_ssm_parameter" "ecs_ami" {
   name = "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
 }
 
 locals {
-
+  # Decodifica JSON do secret para montar DATABASE_URL
   db_credentials = jsondecode(aws_secretsmanager_secret_version.db_credentials.secret_string)
 
   database_url = "postgres://${local.db_credentials.username}:${local.db_credentials.password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/${var.db_name}?sslmode=verify-full&sslrootcert=./global-bundle.pem"
 
+  # Map de env vars do app — serializado como JSON no Secrets Manager
   app_config = {
     DATABASE_URL      = local.database_url
     COGNITO_CLIENT_ID = aws_cognito_user_pool_client.main.id
@@ -35,6 +48,7 @@ resource "aws_secretsmanager_secret_version" "app_config" {
   secret_string = jsonencode(local.app_config)
 }
 
+# Cluster ECS — agrupa services e tasks (não provisiona EC2 sozinho; ASG faz isso)
 resource "aws_ecs_cluster" "main" {
   name = "${var.project_name}-cluster"
 
@@ -43,6 +57,7 @@ resource "aws_ecs_cluster" "main" {
   }
 }
 
+# SG das instâncias EC2 — só aceita tráfego do ALB nas portas dinâmicas
 resource "aws_security_group" "ecs_instance" {
   name        = "${var.project_name}-ecs-instance"
   description = "ECS container instances (${var.project_name})"
@@ -60,6 +75,7 @@ resource "aws_security_group" "ecs_instance" {
   }
 }
 
+# SG do ALB — exposto à internet na porta 80
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb"
   description = "ALB do cadastro-cliente (${var.project_name})"
@@ -85,6 +101,7 @@ resource "aws_security_group" "alb" {
   }
 }
 
+# Regra separada (aws_security_group_rule) — ALB → ECS nas portas efêmeras do bridge mode
 resource "aws_security_group_rule" "alb_to_ecs" {
   type                     = "ingress"
   description              = "Load balancer to ECS dynamic host port"
@@ -95,6 +112,7 @@ resource "aws_security_group_rule" "alb_to_ecs" {
   source_security_group_id = aws_security_group.alb.id
 }
 
+# IAM Role para instâncias EC2 — permite registrar no cluster ECS e puxar imagens
 resource "aws_iam_role" "ecs_instance" {
   name = "${var.project_name}-ecs-instance"
 
@@ -117,11 +135,13 @@ resource "aws_iam_role_policy_attachment" "ecs_instance" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
 }
 
+# Instance Profile — vincula role às instâncias EC2 (EC2 não assume role diretamente)
 resource "aws_iam_instance_profile" "ecs_instance" {
   name = "${var.project_name}-ecs-instance"
   role = aws_iam_role.ecs_instance.name
 }
 
+# Launch Template — blueprint das instâncias EC2 do cluster
 resource "aws_launch_template" "ecs" {
   name_prefix   = "${var.project_name}-ecs-"
   image_id      = data.aws_ssm_parameter.ecs_ami.value
@@ -133,6 +153,7 @@ resource "aws_launch_template" "ecs" {
 
   vpc_security_group_ids = [aws_security_group.ecs_instance.id]
 
+  # user_data: script que roda no boot — registra instância no cluster ECS
   user_data = base64encode(<<-EOF
     #!/bin/bash
     echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config
@@ -147,10 +168,11 @@ resource "aws_launch_template" "ecs" {
   }
 
   lifecycle {
-    create_before_destroy = true
+    create_before_destroy = true # Evita downtime ao atualizar template
   }
 }
 
+# Auto Scaling Group — mantém N instâncias EC2 nas subnets privadas
 resource "aws_autoscaling_group" "ecs" {
   name_prefix         = "${var.project_name}-ecs-"
   vpc_zone_identifier = aws_subnet.private[*].id
@@ -174,6 +196,7 @@ resource "aws_autoscaling_group" "ecs" {
   }
 }
 
+# Application Load Balancer — Layer 7, roteamento HTTP, health checks
 resource "aws_lb" "cadastro_cliente" {
   name               = "${var.project_name}-alb"
   internal           = false
@@ -186,12 +209,13 @@ resource "aws_lb" "cadastro_cliente" {
   }
 }
 
+# Target Group — agrupa targets (instâncias EC2) para o ALB encaminhar tráfego
 resource "aws_lb_target_group" "cadastro_cliente" {
   name_prefix = "cc-"
   port        = 80
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
-  target_type = "instance"
+  target_type = "instance" # Alternativa: ip (Fargate awsvpc) ou lambda
 
   health_check {
     path                = "/health"
@@ -211,6 +235,7 @@ resource "aws_lb_target_group" "cadastro_cliente" {
   }
 }
 
+# Listener HTTP:80 — default action encaminha tudo ao target group cadastro-cliente
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.cadastro_cliente.arn
   port              = 80
@@ -231,6 +256,7 @@ resource "aws_cloudwatch_log_group" "cadastro_cliente" {
   }
 }
 
+# EXECUTION ROLE — usada pelo ECS agent (pull image, logs, secrets)
 resource "aws_iam_role" "ecs_task_execution" {
   name = "${var.project_name}-ecs-task-execution"
 
@@ -285,6 +311,7 @@ resource "aws_iam_role_policy" "ecs_task_execution" {
   })
 }
 
+# TASK ROLE — credenciais disponíveis DENTRO do container (aqui vazia; app usa env vars)
 resource "aws_iam_role" "ecs_task" {
   name = "${var.project_name}-ecs-task"
 
@@ -302,9 +329,10 @@ resource "aws_iam_role" "ecs_task" {
   }
 }
 
+# Task Definition — blueprint do container (imagem, CPU/mem, ports, secrets, logs)
 resource "aws_ecs_task_definition" "cadastro_cliente" {
   family                   = "${var.project_name}-cadastro-cliente"
-  network_mode             = "bridge"
+  network_mode             = "bridge" # EC2 classic; Fargate usa awsvpc
   requires_compatibilities = ["EC2"]
   execution_role_arn       = aws_iam_role.ecs_task_execution.arn
   task_role_arn            = aws_iam_role.ecs_task.arn
@@ -316,7 +344,7 @@ resource "aws_ecs_task_definition" "cadastro_cliente" {
     memory    = var.app_container_memory
     portMappings = [{
       containerPort = var.app_container_port
-      hostPort      = 0
+      hostPort      = 0 # Dynamic port mapping
       protocol      = "tcp"
     }]
     logConfiguration = {
@@ -327,7 +355,7 @@ resource "aws_ecs_task_definition" "cadastro_cliente" {
         "awslogs-stream-prefix" = "cadastro-cliente"
       }
     }
-
+    # secrets: injeta valores do Secrets Manager como env vars (não aparecem em plain text no console)
     secrets = [
       { name = "DATABASE_URL", valueFrom = "${aws_secretsmanager_secret.app_config.arn}:DATABASE_URL::" },
       { name = "COGNITO_CLIENT_ID", valueFrom = "${aws_secretsmanager_secret.app_config.arn}:COGNITO_CLIENT_ID::" },
@@ -339,6 +367,7 @@ resource "aws_ecs_task_definition" "cadastro_cliente" {
   }])
 }
 
+# ECS Service — mantém desired_count tasks rodando; registra no target group do ALB
 resource "aws_ecs_service" "cadastro_cliente" {
   name            = "${var.project_name}-cadastro-cliente"
   cluster         = aws_ecs_cluster.main.id

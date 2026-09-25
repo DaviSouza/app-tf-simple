@@ -1,3 +1,13 @@
+# =============================================================================
+# CLOUDFRONT + S3 POLICY — CDN global para SPA + proxy realtime
+# =============================================================================
+# Entrevista: "O que é OAC (Origin Access Control)?"
+# → Substitui OAI legado. CloudFront assina requests S3 com SigV4; bucket permanece privado.
+# ordered_cache_behavior: regras por path (/realtime/* → ALB, resto → S3).
+# custom_error_response 403/404→index.html: padrão SPA (client-side routing).
+# =============================================================================
+
+# OAC — identidade que CloudFront usa para acessar o bucket S3 privado
 resource "aws_cloudfront_origin_access_control" "front" {
   name                              = "${var.project_name}-front-oac"
   description                       = "OAC para bucket ${var.project_name}"
@@ -11,14 +21,16 @@ resource "aws_cloudfront_distribution" "front" {
   is_ipv6_enabled     = true
   default_root_object = "index.html"
   comment             = "${var.project_name} front SPA"
-  web_acl_id          = aws_wafv2_web_acl.cloudfront.arn
+  web_acl_id          = aws_wafv2_web_acl.cloudfront.arn # WAF em us-east-1 protege esta distribuição
 
+  # Origin 1: arquivos estáticos do front (HTML, JS, CSS)
   origin {
     domain_name              = aws_s3_bucket.front.bucket_regional_domain_name
     origin_id                = "s3-front"
     origin_access_control_id = aws_cloudfront_origin_access_control.front.id
   }
 
+  # Origin 2: ALB para rotas /realtime/* (SSE, WebSocket-like, API realtime)
   origin {
     domain_name = aws_lb.cadastro_cliente.dns_name
     origin_id   = "alb-realtime"
@@ -26,31 +38,34 @@ resource "aws_cloudfront_distribution" "front" {
     custom_origin_config {
       http_port              = 80
       https_port             = 443
-      origin_protocol_policy = "http-only"
+      origin_protocol_policy = "http-only" # ALB interno fala HTTP; CloudFront→viewer é HTTPS
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
 
+  # Comportamento default: cache agressivo para assets estáticos
   default_cache_behavior {
     target_origin_id       = "s3-front"
     viewer_protocol_policy = "redirect-to-https"
     allowed_methods        = ["GET", "HEAD", "OPTIONS"]
     cached_methods         = ["GET", "HEAD"]
-    cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+    cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # Managed policy: CachingOptimized
     compress               = true
   }
 
+  # Comportamento específico: /realtime/* vai ao ALB, sem cache (SSE/eventos)
   ordered_cache_behavior {
     path_pattern             = "/realtime/*"
     target_origin_id         = "alb-realtime"
     viewer_protocol_policy   = "redirect-to-https"
     allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods           = ["GET", "HEAD"]
-    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
-    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # CachingDisabled
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac" # AllViewerExceptHostHeader
     compress                 = false
   }
 
+  # SPA fallback: rotas client-side (ex.: /clientes/123) retornam index.html
   custom_error_response {
     error_code            = 403
     response_code         = 200
@@ -72,7 +87,7 @@ resource "aws_cloudfront_distribution" "front" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = true # *.cloudfront.net — em prod use ACM + domínio customizado
   }
 
   tags = {
@@ -80,6 +95,7 @@ resource "aws_cloudfront_distribution" "front" {
   }
 }
 
+# Bucket policy — duas regras: deny HTTP + allow CloudFront OAC
 resource "aws_s3_bucket_policy" "front" {
   bucket = aws_s3_bucket.front.id
 
